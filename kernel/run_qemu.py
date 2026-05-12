@@ -12,6 +12,67 @@ error = None
 process = None
 
 
+def stream_qemu_output(job, cmd, out, prefix):
+    config = job.get_config()
+    timeout = config.get('qemu.timeout', 60)
+    no_output_timeout = config.get('qemu.no_output_timeout', 60)
+    deadline = time.time() + timeout
+    last_output = time.time()
+
+    with open(out, "w", errors='ignore', buffering=1) as f, \
+         open("/mnt/cghook/console_log", "a", errors='ignore', buffering=1) as hook_f:
+        f.write(cmd)
+        f.write("\n")
+        f.flush()
+        p = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE,
+            shell=True,
+            text=True,
+            bufsize=1,
+        )
+        try:
+            p.stdin.write("\n")
+            p.stdin.flush()
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
+
+        while True:
+            if p.poll() is not None:
+                for line in p.stdout:
+                    f.write(line)
+                    hook_f.write(prefix + line)
+                break
+
+            now = time.time()
+            if now >= deadline:
+                hook_f.write(f"{prefix}killed after qemu.timeout={timeout}s\n")
+                p.kill()
+                break
+            if now - last_output >= no_output_timeout:
+                hook_f.write(f"{prefix}killed after no output for {no_output_timeout}s\n")
+                p.kill()
+                break
+
+            readable, _, _ = select.select([p.stdout], [], [], 1)
+            if not readable:
+                continue
+            line = p.stdout.readline()
+            if not line:
+                continue
+            last_output = time.time()
+            f.write(line)
+            f.flush()
+            hook_f.write(prefix + line)
+            hook_f.flush()
+
+        p.wait()
+    return error, process
+
+
 def run_qemu_thread(job, sbi, os_file, fs, out):
     global error
     global process
@@ -71,39 +132,7 @@ def run_qemu(job, sbi, os_file, fs, out):
     job.add_log(cmd, "QEMU CMD")
     console_log("运行：" + cmd)
 
-    with open(out, "w", errors='ignore', buffering=1) as f, \
-         open("/mnt/cghook/console_log", "a", errors='ignore', buffering=1) as hook_f:
-        f.write(cmd)
-        f.write("\n")
-        f.flush()
-        p = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,
-            shell=True,
-            text=True,
-            bufsize=1,
-        )
-        try:
-            p.stdin.write("\n")
-            p.stdin.flush()
-            p.stdin.close()
-            for line in p.stdout:
-                f.write(line)
-                f.flush()
-                hook_f.write("qemu-system-riscv:" + line)
-                hook_f.flush()
-            p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            for line in p.stdout:
-                f.write(line)
-                f.flush()
-                hook_f.write("qemu-system-riscv:" + line)
-                hook_f.flush()
-            p.wait()
-    return error, process
+    return stream_qemu_output(job, cmd, out, "qemu-system-riscv:")
 
 
 def run_qemu_loong(job, sbi, os_file, fs, out):
@@ -119,39 +148,7 @@ def run_qemu_loong(job, sbi, os_file, fs, out):
         cmd += " -drive file=disk-la.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1"
     job.add_log(cmd, "QEMU CMD")
     console_log("运行：" + cmd)
-    with open(out, "w", errors='ignore', buffering=1) as f, \
-         open("/mnt/cghook/console_log", "a", errors='ignore', buffering=1) as hook_f:
-        f.write(cmd)
-        f.write("\n")
-        f.flush()
-        p = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE,
-            shell=True,
-            text=True,
-            bufsize=1,
-        )
-        try:
-            p.stdin.write("\n")
-            p.stdin.flush()
-            p.stdin.close()
-            for line in p.stdout:
-                f.write(line)
-                f.flush()
-                hook_f.write("qemu-system-loong:" + line)
-                hook_f.flush()
-            p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            for line in p.stdout:
-                f.write(line)
-                f.flush()
-                hook_f.write("qemu-system-loong:" + line)
-                hook_f.flush()
-            p.wait()
-    return error, process
+    return stream_qemu_output(job, cmd, out, "qemu-system-loong:")
 
 """
 dd if=/dev/zero of=2kfs.img bs=100M count=1
