@@ -1,5 +1,6 @@
 import sys
 import json
+import re
 
 # This is for reference only and is unused below.
 # Note terminal control sequences (\x1b[...m) should be present in real output, which isn't shown here.
@@ -38,48 +39,87 @@ warnings 0
 END LTP CASE setegid02: 0
 '''
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+LTP_RESULT_KEYS = {
+    "TPASS": "passed",
+    "TFAIL": "failed",
+    "TBROK": "broken",
+    "TCONF": "skipped",
+    "TWARN": "warnings",
+}
+
+
 def parse_ltp_log(content: str):
     lines = content.split('\n')
     result = {}
     testcase = None
-    passed, failed, broken, skipped, warnings = 0, 0, 0, 0, 0
+    counts = None
+    summary_counts = None
+    in_summary = False
+
+    def reset_counts():
+        return {'passed': 0, 'failed': 0, 'broken': 0, 'skipped': 0, 'warnings': 0}
+
+    def finish_case():
+        nonlocal testcase, counts, summary_counts, in_summary
+        if not testcase:
+            return
+        active = counts if counts and sum(counts.values()) > 0 else summary_counts
+        active = active or reset_counts()
+        result[testcase] = {
+            "success": active["passed"],
+            "failed": active["failed"],
+            "broken": active["broken"],
+            "skipped": active["skipped"],
+            "warnings": active["warnings"],
+            "all": sum(active.values()),
+        }
+        testcase = None
+        counts = None
+        summary_counts = None
+        in_summary = False
+
     for line in lines:
-        line = line.strip()
+        line = ANSI_RE.sub("", line).strip()
 
         if line.startswith('RUN LTP CASE'):
+            finish_case()
             testcase = line.split()[-1]
-            continue
-        
-        # Look at LTP logs (TPASS, TFAIL etc.) rather than summary.
-        # Some LTP binaries don't produce summaries when run directly.
-        if line.startswith("FAIL LTP CASE"):
-            result[testcase] = {
-                "success": passed,
-                "failed": failed,
-                "broken": broken,
-                "skipped": skipped,
-                "warnings": warnings,
-                "all": passed + failed + broken + skipped + warnings
-            }
-            testcase = ""
-            passed, failed, broken, skipped, warnings = 0, 0, 0, 0, 0
+            counts = reset_counts()
+            summary_counts = reset_counts()
+            in_summary = False
             continue
 
-        if "\x1b[1;32mTPASS: \x1b[0m" in line:
-            passed += 1
+        # Look at LTP logs (TPASS, TFAIL etc.) rather than summary.
+        # Some LTP binaries don't produce summaries when run directly.
+        if line.startswith("PASS LTP CASE") or line.startswith("FAIL LTP CASE") or line.startswith("END LTP CASE"):
+            finish_case()
             continue
-        if "\x1b[1;31mTFAIL: \x1b[0m" in line:
-            failed += 1
+
+        if not testcase:
             continue
-        if "\x1b[1;31mTBROK: \x1b[0m" in line:
-            broken += 1
+
+        if line == "Summary:":
+            in_summary = True
             continue
-        if "\x1b[1;33mTCONF: \x1b[0m" in line:
-            skipped += 1
-            continue
-        if "\x1b[1;35mTWARN: \x1b[0m" in line:
-            warnings += 1
-            continue
+
+        if in_summary:
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in summary_counts:
+                try:
+                    summary_counts[parts[0]] += int(parts[1])
+                except ValueError:
+                    pass
+                continue
+            if not line:
+                in_summary = False
+
+        for marker, key in LTP_RESULT_KEYS.items():
+            if f"{marker}:" in line:
+                counts[key] += 1
+                break
+
+    finish_case()
 
     return result
 

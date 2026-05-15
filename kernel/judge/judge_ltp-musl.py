@@ -1,5 +1,6 @@
 import sys
 import json
+import re
 
 template = '''
 RUN LTP CASE writev01
@@ -36,37 +37,63 @@ warnings 0
 END LTP CASE setegid02: 0
 '''
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+LTP_RESULT_KEYS = {
+    "TPASS": "passed",
+    "TFAIL": "failed",
+    "TBROK": "broken",
+    "TCONF": "skipped",
+    "TWARN": "warnings",
+}
+
+
 def parse_ltp_log(content):
     lines = content.split('\n')
     result = {}
     current_case = None
-    return_code = None
+    counts = None
+    summary_data = None
     in_summary = False
 
+    def reset_counts():
+        return {'passed': 0, 'failed': 0, 'broken': 0, 'skipped': 0, 'warnings': 0}
+
+    def finish_case():
+        nonlocal current_case, counts, summary_data, in_summary
+        if not current_case:
+            return
+        active = counts if counts and sum(counts.values()) > 0 else summary_data
+        active = active or reset_counts()
+        result[current_case] = {
+            'passed': active['passed'],
+            'failed': active['failed'],
+            'broken': active['broken'],
+            'skipped': active['skipped'],
+            'warnings': active['warnings'],
+            'all': sum(active.values()),
+            'success': active['passed']
+        }
+        current_case = None
+        counts = None
+        summary_data = None
+        in_summary = False
+
     for line in lines:
-        stripped_line = line.strip()
+        stripped_line = ANSI_RE.sub("", line).strip()
 
         if stripped_line.startswith('RUN LTP CASE'):
+            finish_case()
             current_case = stripped_line.split()[-1]
-            summary_data = {'passed': 0, 'failed': 0, 'broken': 0, 'skipped': 0, 'warnings': 0, 'all': 0}
-            return_code = None
+            counts = reset_counts()
+            summary_data = reset_counts()
             in_summary = False
 
-        elif current_case and stripped_line.startswith(f'FAIL LTP CASE {current_case}'):
-            parts = stripped_line.split()
-            return_code = int(parts[-1])
-            success = summary_data.get('passed', 0)
-
-            result[current_case] = {
-                'passed': summary_data['passed'],
-                'failed': summary_data['failed'],
-                'broken': summary_data['broken'],
-                'skipped': summary_data['skipped'],
-                'warnings': summary_data['warnings'],
-                'all': summary_data['all'],
-                'success': success
-            }
-            current_case = None
+        elif current_case and (
+            stripped_line.startswith(f'PASS LTP CASE {current_case}')
+            or stripped_line.startswith(f'FAIL LTP CASE {current_case}')
+            or stripped_line.startswith(f'END LTP CASE {current_case}')
+        ):
+            finish_case()
 
         elif current_case:
             if stripped_line == 'Summary:':
@@ -81,9 +108,18 @@ def parse_ltp_log(content):
                 parts = stripped_line.split()
                 if len(parts) >= 2 and parts[0] in ['passed', 'failed', 'broken', 'skipped', 'warnings']:
                     key = parts[0]
-                    value = int(parts[1])
-                    summary_data[key] += value
-                    summary_data['all'] += value
+                    try:
+                        summary_data[key] += int(parts[1])
+                    except ValueError:
+                        pass
+                    continue
+
+            for marker, key in LTP_RESULT_KEYS.items():
+                if f"{marker}:" in stripped_line:
+                    counts[key] += 1
+                    break
+
+    finish_case()
 
     return result
 

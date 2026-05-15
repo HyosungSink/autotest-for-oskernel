@@ -3,6 +3,32 @@ import os
 from pygrading import *
 import re
 import tempfile
+from urllib.parse import urlsplit, urlunsplit
+
+
+def mask_repo_url(url):
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+
+    if not parts.username and not parts.password:
+        return url
+
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"{parts.username or '***'}:***@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def sanitize_config_for_log(config):
+    sanitized = dict(config)
+    if sanitized.get('repo_url'):
+        sanitized['repo_url'] = mask_repo_url(sanitized['repo_url'])
+    if sanitized.get('server_password'):
+        sanitized['server_password'] = '***'
+    return sanitized
 
 
 def console_log(text):
@@ -61,6 +87,10 @@ class Env:
         self.config['server_password'] = os.environ.get('SERVER_PSW', None)
         self.config['server_user'] = os.environ.get('SERVER_USER', 'root')
         self.config['server_dev'] = os.environ.get('SERVER_DEV', "QEMU")
+        self.config['repo_url'] = os.environ.get('REPO_URL', self.config.get('repo_url'))
+        self.config['repo_ref'] = os.environ.get('REPO_REF', self.config.get('repo_ref'))
+        self.config['repo_subdir'] = os.environ.get('REPO_SUBDIR', self.config.get('repo_subdir'))
+        self.config['repo_depth'] = os.environ.get('REPO_DEPTH', self.config.get('repo_depth'))
 
         # test_track_config = {track_grading_enable_config_key: self.config.get(track_grading_enable_config_key, True),
         #                      track_auth_jwt_config_key: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9."
@@ -70,7 +100,7 @@ class Env:
         #                      track_lrs_endpoint_config_key: 'http://218.28.198.182:8080/cglearning'}
         # self.config.update(test_track_config)
 
-        loge(self.config)
+        loge(sanitize_config_for_log(self.config))
         return self
 
     def __getitem__(self, item):
